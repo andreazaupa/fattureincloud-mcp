@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:developers.fattureincloud.it)",
+      "Bash(source .env)",
+      "Bash(python -c \":*)",
+      "Bash(source venv/bin/activate)"
+    ]
+  }
+}

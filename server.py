@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.8.0
+"""Fatture in Cloud MCP Server - v1.9.0
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
@@ -190,7 +190,7 @@ async def list_tools():
     return [
         Tool(
             name="list_invoices",
-            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma — default: invoice)",
+            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma, order, quote, delivery_note — default: invoice)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -204,7 +204,7 @@ async def list_tools():
         ),
         Tool(
             name="get_invoice",
-            description="Dettaglio documento per ID (fattura, NDC, proforma)",
+            description="Dettaglio documento per ID (fattura, NDC, proforma, ordine, preventivo, DDT)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -344,7 +344,7 @@ async def list_tools():
         ),
         Tool(
             name="update_document",
-            description="Modifica parziale di un documento BOZZA (fattura, NDC, proforma). Passa solo i campi da aggiornare. Funziona solo su documenti non ancora inviati allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            description="Modifica parziale di un documento BOZZA (fattura, NDC, proforma, ordine, preventivo). Passa solo i campi da aggiornare. Funziona solo su documenti non ancora inviati allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -463,6 +463,88 @@ async def list_tools():
                     "year": {"type": "integer", "description": "Anno da verificare (es. 2025)"}
                 },
                 "required": ["year"]
+            }
+        ),
+        Tool(
+            name="list_orders",
+            description="Lista ordini cliente emessi. Filtri: year (obbligatorio), month (opzionale), query (opzionale).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "year": {"type": "integer", "description": "Anno (es. 2025)"},
+                    "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
+                    "query": {"type": "string", "description": "Filtro testuale su cliente/oggetto (opzionale)"}
+                },
+                "required": ["year"]
+            }
+        ),
+        Tool(
+            name="list_quotes",
+            description="Lista preventivi emessi. Filtri: year (obbligatorio), month (opzionale), query (opzionale).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "year": {"type": "integer", "description": "Anno (es. 2025)"},
+                    "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
+                    "query": {"type": "string", "description": "Filtro testuale su cliente/oggetto (opzionale)"}
+                },
+                "required": ["year"]
+            }
+        ),
+        Tool(
+            name="list_delivery_notes",
+            description="Lista DDT (documenti di trasporto) emessi. Filtri: year (obbligatorio), month (opzionale), query (opzionale).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "year": {"type": "integer", "description": "Anno (es. 2025)"},
+                    "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
+                    "query": {"type": "string", "description": "Filtro testuale su cliente/oggetto (opzionale)"}
+                },
+                "required": ["year"]
+            }
+        ),
+        Tool(
+            name="create_order",
+            description="Crea ordine cliente (bozza, non fiscale). IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer", "description": "ID cliente"},
+                    "items": {"type": "array", "items": item_schema},
+                    "date": {"type": "string", "description": "Data YYYY-MM-DD (default: oggi)"},
+                    "visible_subject": {"type": "string", "description": "Oggetto/riferimento ordine (opzionale)"}
+                },
+                "required": ["client_id", "items"]
+            }
+        ),
+        Tool(
+            name="create_quote",
+            description="Crea preventivo (bozza, non fiscale). IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer", "description": "ID cliente"},
+                    "items": {"type": "array", "items": item_schema},
+                    "date": {"type": "string", "description": "Data YYYY-MM-DD (default: oggi)"},
+                    "visible_subject": {"type": "string", "description": "Oggetto preventivo (opzionale)"},
+                    "validity_date": {"type": "string", "description": "Data validità preventivo YYYY-MM-DD (opzionale)"}
+                },
+                "required": ["client_id", "items"]
+            }
+        ),
+        Tool(
+            name="transform_document",
+            description="Trasforma un documento da un tipo all'altro (es. preventivo→ordine, ordine→fattura, DDT→fattura). IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "integer", "description": "ID documento da trasformare"},
+                    "new_type": {"type": "string", "description": "Tipo destinazione: invoice, order, quote, delivery_note, credit_note"},
+                    "keep_original": {"type": "boolean", "description": "Mantieni il documento originale (default: false)"},
+                    "e_invoice": {"type": "boolean", "description": "Abilita fattura elettronica se new_type=invoice (default: true)"}
+                },
+                "required": ["document_id", "new_type"]
             }
         ),
     ]
@@ -1162,6 +1244,114 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "continuous": len(gaps) == 0,
                 "status": "✓ Numerazione continua" if len(gaps) == 0 else f"⚠ Trovati {len(gaps)} problemi",
                 "gaps": gaps
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name in ("list_orders", "list_quotes", "list_delivery_notes"):
+            type_map = {"list_orders": "order", "list_quotes": "quote", "list_delivery_notes": "delivery_note"}
+            doc_type = type_map[name]
+            year = arguments.get("year", datetime.now().year)
+            month = arguments.get("month")
+            query = arguments.get("query")
+
+            q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
+            if month:
+                last_day = 31 if month in [1,3,5,7,8,10,12] else 30 if month in [4,6,9,11] else 29
+                q = f"date >= '{year}-{month:02d}-01' and date <= '{year}-{month:02d}-{last_day}'"
+
+            response = issued_api.list_issued_documents(
+                company_id=COMPANY_ID, type=doc_type, q=q, per_page=100, fieldset="detailed"
+            )
+            docs = []
+            for doc in (response.data or []):
+                d = doc.to_dict()
+                item = {
+                    "id": d.get("id"),
+                    "number": d.get("number"),
+                    "date": str(d.get("date", "")),
+                    "client": d.get("entity", {}).get("name") if d.get("entity") else None,
+                    "total": get_total_from_doc(d),
+                    "subject": d.get("subject"),
+                    "description": d.get("visible_subject")
+                }
+                if query:
+                    search_text = f"{item['client']} {item['subject']} {item['description']}".lower()
+                    if query.lower() not in search_text:
+                        continue
+                docs.append(item)
+            return [TextContent(type="text", text=json.dumps(docs, indent=2, ensure_ascii=False))]
+
+        elif name == "create_order":
+            result, error = build_issued_document(
+                doc_type="order",
+                client_id=arguments["client_id"],
+                items_data=arguments["items"],
+                date_str=arguments.get("date", datetime.now().strftime("%Y-%m-%d")),
+                payment_days=30,
+                visible_subject=arguments.get("visible_subject", ""),
+            )
+            if error:
+                return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
+            result["message"] = f"Ordine #{result['number']} creato come bozza."
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "create_quote":
+            date_str = arguments.get("date", datetime.now().strftime("%Y-%m-%d"))
+            result, error = build_issued_document(
+                doc_type="quote",
+                client_id=arguments["client_id"],
+                items_data=arguments["items"],
+                date_str=date_str,
+                payment_days=30,
+                visible_subject=arguments.get("visible_subject", ""),
+            )
+            if error:
+                return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
+            if arguments.get("validity_date"):
+                try:
+                    issued_api.modify_issued_document(
+                        company_id=COMPANY_ID, document_id=result["id"],
+                        modify_issued_document_request={"data": {"validity_date": arguments["validity_date"]}}
+                    )
+                    result["validity_date"] = arguments["validity_date"]
+                except Exception:
+                    pass
+            result["message"] = f"Preventivo #{result['number']} creato come bozza."
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "transform_document":
+            doc_id = arguments["document_id"]
+            new_type = arguments["new_type"]
+            keep_original = arguments.get("keep_original", False)
+            use_e_invoice = arguments.get("e_invoice", new_type == "invoice")
+
+            orig_resp = issued_api.get_issued_document(
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
+            )
+            orig = orig_resp.data.to_dict()
+            orig_type = orig.get("type")
+            orig_number = orig.get("number")
+
+            response = issued_api.transform_issued_document(
+                company_id=COMPANY_ID,
+                original_document_id=doc_id,
+                new_type=new_type,
+                e_invoice=1 if use_e_invoice else 0,
+                transform_keep_copy=1 if keep_original else 0
+            )
+            d = response.data.to_dict()
+            result = {
+                "success": True,
+                "id": d.get("id"),
+                "number": d.get("number"),
+                "new_type": new_type,
+                "original_type": orig_type,
+                "original_number": orig_number,
+                "original_kept": keep_original,
+                "date": str(d.get("date", "")),
+                "client": d.get("entity", {}).get("name") if d.get("entity") else None,
+                "total": get_total_from_doc(d),
+                "message": f"Documento #{orig_number} ({orig_type}) trasformato in {new_type} #{d.get('number')} come bozza."
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
