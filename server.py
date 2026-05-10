@@ -24,6 +24,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+import cache
+
 ACCESS_TOKEN = os.getenv("FIC_ACCESS_TOKEN", "")
 COMPANY_ID = int(os.getenv("FIC_COMPANY_ID", "0"))
 SENDER_EMAIL = os.getenv("FIC_SENDER_EMAIL", "")
@@ -49,17 +51,27 @@ def get_total_from_doc(d):
     return sum((i.get('qty', 0) * i.get('gross_price', 0)) for i in items)
 
 
-def get_client_by_id(client_id):
+def get_client_by_id(client_id, *, company_id=None):
+    if company_id is None:
+        company_id = COMPANY_ID
+    resource = f"client_{client_id}"
+    hit = cache.get(resource, company_id, ttl=timedelta(hours=24))
+    if hit is not None:
+        return hit
     try:
-        response = clients_api.get_client(company_id=COMPANY_ID, client_id=client_id)
-        return response.data.to_dict()
+        response = clients_api.get_client(company_id=company_id, client_id=client_id)
+        data = response.data.to_dict()
+        cache.put(resource, company_id, data)
+        return data
     except:
         return None
 
 
-def get_ei_code_for_client(client_id):
+def get_ei_code_for_client(client_id, *, company_id=None):
+    if company_id is None:
+        company_id = COMPANY_ID
     try:
-        client = get_client_by_id(client_id)
+        client = get_client_by_id(client_id, company_id=company_id)
         if client:
             ei_code = (client.get('ei_code') or '').strip()
             if ei_code:
