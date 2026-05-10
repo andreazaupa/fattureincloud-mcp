@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.9.0
+"""Fatture in Cloud MCP Server - v2.0.0
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
@@ -23,9 +23,20 @@ from fattureincloud_python_sdk.api.info_api import InfoApi
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, ToolAnnotations
 
 import cache
+
+
+def _ann(read_only=False, destructive=False, idempotent=False, open_world=True):
+    """Shorthand for MCP tool annotations. openWorld defaults to True since
+    every tool talks to the FattureInCloud API."""
+    return ToolAnnotations(
+        readOnlyHint=read_only,
+        destructiveHint=destructive,
+        idempotentHint=idempotent,
+        openWorldHint=open_world,
+    )
 
 ACCESS_TOKEN = os.getenv("FIC_ACCESS_TOKEN", "")
 COMPANY_ID = int(os.getenv("FIC_COMPANY_ID", "0"))
@@ -236,7 +247,8 @@ async def list_tools():
                     "type": {"type": "string", "description": "Tipo documento: invoice (default), credit_note, proforma"}
                 },
                 "required": ["year"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_invoice",
@@ -247,7 +259,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_pdf_url",
@@ -258,7 +271,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="list_clients",
@@ -268,12 +282,14 @@ async def list_tools():
                 "properties": {
                     "query": {"type": "string", "description": "Filtro nome/ragione sociale (opzionale)"}
                 }
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_company_info",
             description="Info azienda collegata",
-            inputSchema={"type": "object", "properties": {}}
+            inputSchema={"type": "object", "properties": {}},
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="create_client",
@@ -295,7 +311,8 @@ async def list_tools():
                     "phone": {"type": "string", "description": "Telefono (opzionale)"}
                 },
                 "required": ["name"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="update_client",
@@ -317,7 +334,8 @@ async def list_tools():
                     "phone": {"type": "string", "description": "Telefono (opzionale)"}
                 },
                 "required": ["client_id"]
-            }
+            },
+            annotations=_ann(idempotent=True),
         ),
         Tool(
             name="create_invoice",
@@ -333,7 +351,8 @@ async def list_tools():
                     "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, deve esistere — vedi list_cost_centers)"}
                 },
                 "required": ["client_id", "items"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="create_credit_note",
@@ -350,7 +369,8 @@ async def list_tools():
                     "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, deve esistere — vedi list_cost_centers)"}
                 },
                 "required": ["client_id", "items"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="create_proforma",
@@ -366,7 +386,8 @@ async def list_tools():
                     "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, deve esistere — vedi list_cost_centers)"}
                 },
                 "required": ["client_id", "items"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="convert_proforma_to_invoice",
@@ -380,7 +401,8 @@ async def list_tools():
                     "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, eredita da proforma se non passato)"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(destructive=True),
         ),
         Tool(
             name="update_document",
@@ -400,7 +422,8 @@ async def list_tools():
                     "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, mantiene quello esistente se non passato)"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(idempotent=True),
         ),
         Tool(
             name="duplicate_invoice",
@@ -422,7 +445,8 @@ async def list_tools():
                     "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, eredita dalla fattura sorgente se non passato)"}
                 },
                 "required": ["source_document_id"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="delete_invoice",
@@ -433,7 +457,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento da eliminare"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(destructive=True, idempotent=True),
         ),
         Tool(
             name="send_to_sdi",
@@ -444,7 +469,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento da inviare"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="get_invoice_status",
@@ -455,11 +481,12 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="send_email",
-            description="Invia copia cortesia via email al cliente. IMPORTANTE: Chiedere conferma prima di eseguire.",
+            description="Invia copia cortesia via email al cliente. Requires FIC_SENDER_EMAIL to be configured in extension settings. IMPORTANTE: Chiedere conferma prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -469,7 +496,8 @@ async def list_tools():
                     "body": {"type": "string", "description": "Corpo email (opzionale)"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="list_received_documents",
@@ -483,7 +511,8 @@ async def list_tools():
                     "query": {"type": "string", "description": "Filtro testuale (opzionale)"}
                 },
                 "required": ["year"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_situation",
@@ -494,7 +523,8 @@ async def list_tools():
                     "year": {"type": "integer", "description": "Anno (default: corrente)"},
                     "client_name": {"type": "string", "description": "Filtro per nome cliente (opzionale, ricerca parziale)"}
                 }
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="check_numeration",
@@ -505,12 +535,14 @@ async def list_tools():
                     "year": {"type": "integer", "description": "Anno da verificare (es. 2025)"}
                 },
                 "required": ["year"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="list_cost_centers",
             description="Lista i centri di costo/ricavo configurati in FattureInCloud. Stessa anagrafica usata come 'revenue_center' sui documenti emessi e 'cost_center' sui documenti ricevuti. Read-only.",
-            inputSchema={"type": "object", "properties": {}}
+            inputSchema={"type": "object", "properties": {}},
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_received_document",
@@ -521,7 +553,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento ricevuto"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="create_received_document",
@@ -540,7 +573,8 @@ async def list_tools():
                     "cost_center": {"type": "string", "description": "Centro di costo (opzionale, deve esistere — vedi list_cost_centers)"}
                 },
                 "required": ["supplier_name", "amount_net"]
-            }
+            },
+            annotations=_ann(),
         ),
     ]
 
@@ -1125,6 +1159,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "send_email":
+            if not SENDER_EMAIL:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": "❌ Sender email not configured. Open Claude Desktop → Extensions → FattureInCloud → Settings and set the 'Sender email' field, then retry the operation."
+                }, ensure_ascii=False))]
             doc_id = arguments["document_id"]
             check = issued_api.get_issued_document(
                 company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
@@ -1134,10 +1173,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if not recipient_email:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False, "error": "Nessuna email specificata e cliente senza email in anagrafica"
-                }, ensure_ascii=False))]
-            if not SENDER_EMAIL:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False, "error": "FIC_SENDER_EMAIL non configurato nel .env"
                 }, ensure_ascii=False))]
             email_data = {"data": {
                 "sender_email": SENDER_EMAIL, "recipient_email": recipient_email, "cc_email": "",

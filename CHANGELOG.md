@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.0.0
+- NEW: MCPB bundle for Claude Desktop one-click installation. Distributable artifact `dist/fattureincloud.mcpb` produced by `scripts/build.sh`. Same 23 tools as v1.9.0, no behavioral changes for users.
+- NEW: `manifest.json` (manifest_version 0.3) declaring the server entry point, runtime deps, user_config (API token + company ID + sender email), and tool annotations.
+- NEW: tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) on all 23 tools, both in `manifest.json` and on the `Tool()` declarations in `server.py`. Helps MCP clients reason about safe-to-replay vs side-effecting calls.
+- NEW: `SECURITY.md` (vulnerability disclosure policy).
+- NEW: `docs/PRIVACY.md` (Privacy Policy, mirrored at https://media-form.it/privacy-policy.html and referenced from `manifest.json`).
+- NEW: `scripts/build.sh` and `scripts/validate.sh` to produce and validate the bundle.
+- NEW: `.mcpbignore` to keep the bundle minimal (no tests, no dev artifacts).
+- CHANGE: README extended with MCPB installation path, Privacy & Data handling, Trademark disclaimer, and Contributing sections.
+- NOTE: v2.0.0 does not introduce or modify any tool. The version bump reflects the new packaging surface (MCPB) targeted at the Anthropic Software Directory.
+
 ## v1.9.0
 - NEW: `list_cost_centers` — lista i centri di costo/ricavo configurati in FattureInCloud
 - NEW: `get_received_document` — dettaglio fattura passiva per ID

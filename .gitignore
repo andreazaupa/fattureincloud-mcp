@@ -30,3 +30,7 @@ dist/
 .coverage.*
 htmlcov/
 .pytest_cache/
+icon-original.png
+
+# MCPB build outputs
+lib/
