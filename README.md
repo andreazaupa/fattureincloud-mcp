@@ -12,7 +12,7 @@ Server MCP (Model Context Protocol) per integrare **Fatture in Cloud** con Claud
 
 Permette di gestire fatture elettroniche italiane tramite conversazione naturale.
 
-### ✨ Funzionalità (20 tool)
+### ✨ Funzionalità (23 tool)
 
 | Tool | Descrizione |
 |------|-------------|
@@ -21,19 +21,22 @@ Permette di gestire fatture elettroniche italiane tramite conversazione naturale
 | `get_pdf_url` | URL PDF e link web documento |
 | `list_clients` | Lista clienti con filtro |
 | `get_company_info` | Info azienda collegata |
-| `create_client` | 🆕 Crea nuovo cliente in anagrafica |
-| `update_client` | 🆕 Aggiorna dati cliente esistente |
-| `create_invoice` | Crea nuova fattura (bozza) con codice SDI automatico |
-| `create_credit_note` | Crea nota di credito (bozza) |
-| `create_proforma` | Crea proforma (bozza, non inviabile SDI) |
-| `convert_proforma_to_invoice` | 🆕 Converte proforma in fattura elettronica |
-| `update_document` | Modifica parziale documento bozza |
-| `duplicate_invoice` | Duplica fattura con codice SDI aggiornato |
+| `create_client` | Crea nuovo cliente in anagrafica |
+| `update_client` | Aggiorna dati cliente esistente |
+| `create_invoice` | Crea nuova fattura (bozza) con codice SDI automatico — opzionale `revenue_center` 🆕 |
+| `create_credit_note` | Crea nota di credito (bozza) — opzionale `revenue_center` 🆕 |
+| `create_proforma` | Crea proforma (bozza, non inviabile SDI) — opzionale `revenue_center` 🆕 |
+| `convert_proforma_to_invoice` | Converte proforma in fattura elettronica — opzionale `revenue_center` 🆕 |
+| `update_document` | Modifica parziale documento bozza — opzionale `revenue_center` 🆕 |
+| `duplicate_invoice` | Duplica fattura con codice SDI aggiornato — opzionale `revenue_center` 🆕 |
 | `delete_invoice` | Elimina documento bozza (non inviato) |
 | `send_to_sdi` | Invia fattura allo SDI |
 | `get_invoice_status` | Stato fattura elettronica SDI |
 | `send_email` | Invia copia cortesia via email |
-| `list_received_documents` | Fatture passive (fornitori) |
+| `list_received_documents` | Fatture passive (fornitori) — espone `cost_center` 🆕 |
+| `get_received_document` | 🆕 Dettaglio fattura passiva per ID |
+| `create_received_document` | 🆕 Crea documento passivo (spesa/NDC) con opzionale `cost_center` |
+| `list_cost_centers` | 🆕 Lista centri di costo/ricavo configurati |
 | `get_situation` | Dashboard: fatturato netto, incassato, costi, margine |
 | `check_numeration` | Verifica continuità numerica fatture |
 
@@ -76,6 +79,10 @@ Modifica `.env`:
 FIC_ACCESS_TOKEN=a/xxxxx.yyyyy.zzzzz
 FIC_COMPANY_ID=123456
 FIC_SENDER_EMAIL=fatturazione@tuaazienda.it
+
+# Opzionali (cache locale, vedi sezione Caching):
+# FIC_CACHE_DIR=~/.fattureincloud-mcp/cache
+# FIC_CACHE_DISABLED=1
 ```
 
 **Come ottenere le credenziali:**
@@ -120,7 +127,38 @@ Chiudi completamente Claude Desktop (Cmd+Q su Mac) e riaprilo.
 "Verifica la numerazione delle fatture 2025"
 "Converti la proforma 12 in fattura"
 "Crea un nuovo cliente: Rossi SRL, P.IVA 01234567890"
+"Quali centri di costo ho configurato?"
+"Crea una fattura per Acme con centro di ricavo 'Progetto Alpha'"
+"Registra una spesa di 500€ + IVA da Fornitore X sul centro di costo 'Progetto Alpha'"
 ```
+
+### 💾 Caching
+
+Per ridurre le chiamate API ridondanti, le anagrafiche clienti e la lista dei centri di costo vengono mantenute in cache locale (file JSON in `~/.fattureincloud-mcp/cache/`, scoped per `company_id`, TTL 24h).
+
+| Env var | Default | Effetto |
+|---|---|---|
+| `FIC_CACHE_DIR` | `~/.fattureincloud-mcp/cache` | Sovrascrive la directory di cache |
+| `FIC_CACHE_DISABLED` | `0` | Se `1`, disabilita lettura e scrittura cache |
+
+Per forzare il refresh, cancella la directory di cache:
+```bash
+rm -rf ~/.fattureincloud-mcp/cache
+```
+
+### 🏷️ Centri di costo / ricavo
+
+FattureInCloud usa la stessa anagrafica per i "centri di ricavo" sui documenti emessi e i "centri di costo" sui documenti ricevuti. Puoi:
+
+- Recuperare la lista con `list_cost_centers`
+- Passare `revenue_center="<nome>"` quando crei una fattura, NDC, proforma, oppure duplichi/aggiorni/converti un documento emesso
+- Passare `cost_center="<nome>"` quando crei un documento ricevuto
+
+Il valore deve esistere già — i centri si gestiscono dal pannello web di FattureInCloud (Impostazioni → Centri di costo). Se passi un nome non riconosciuto, il tool risponde con la lista dei nomi validi.
+
+### 🐛 Known issues
+
+- **Duplicazione fattura per cliente specifico**: in alcuni casi `duplicate_invoice` può fallire su configurazioni cliente non identificate. Workaround: duplicare manualmente dal pannello web di FattureInCloud. Bug in indagine — vedi [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
 
 ### ⚠️ Note di sicurezza
 
@@ -150,7 +188,7 @@ MCP (Model Context Protocol) Server to integrate **Fatture in Cloud** with Claud
 
 Manage Italian electronic invoices through natural conversation.
 
-### ✨ Features (20 tools)
+### ✨ Features (23 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -159,19 +197,22 @@ Manage Italian electronic invoices through natural conversation.
 | `get_pdf_url` | PDF URL and web link for document |
 | `list_clients` | List clients with filter |
 | `get_company_info` | Connected company info |
-| `create_client` | 🆕 Create new client in registry |
-| `update_client` | 🆕 Update existing client data |
-| `create_invoice` | Create new invoice (draft) with automatic SDI code |
-| `create_credit_note` | Create credit note (draft) |
-| `create_proforma` | Create proforma (draft, not sendable to SDI) |
-| `convert_proforma_to_invoice` | 🆕 Convert proforma to electronic invoice |
-| `update_document` | Partial update of draft document |
-| `duplicate_invoice` | Duplicate invoice with updated SDI code |
+| `create_client` | Create new client in registry |
+| `update_client` | Update existing client data |
+| `create_invoice` | Create new invoice (draft) with automatic SDI code — optional `revenue_center` 🆕 |
+| `create_credit_note` | Create credit note (draft) — optional `revenue_center` 🆕 |
+| `create_proforma` | Create proforma (draft, not sendable to SDI) — optional `revenue_center` 🆕 |
+| `convert_proforma_to_invoice` | Convert proforma to electronic invoice — optional `revenue_center` 🆕 |
+| `update_document` | Partial update of draft document — optional `revenue_center` 🆕 |
+| `duplicate_invoice` | Duplicate invoice with updated SDI code — optional `revenue_center` 🆕 |
 | `delete_invoice` | Delete draft document (not yet sent) |
 | `send_to_sdi` | Send invoice to SDI (Italian e-invoice system) |
 | `get_invoice_status` | E-invoice SDI status |
 | `send_email` | Send courtesy copy via email |
-| `list_received_documents` | Received invoices (suppliers) |
+| `list_received_documents` | Received invoices (suppliers) — exposes `cost_center` 🆕 |
+| `get_received_document` | 🆕 Received document detail by ID |
+| `create_received_document` | 🆕 Create passive document (expense / credit note) with optional `cost_center` |
+| `list_cost_centers` | 🆕 List configured cost/revenue centers |
 | `get_situation` | Dashboard: net revenue, collected, costs, margin |
 | `check_numeration` | Verify invoice numbering continuity |
 
@@ -214,6 +255,10 @@ Edit `.env`:
 FIC_ACCESS_TOKEN=a/xxxxx.yyyyy.zzzzz
 FIC_COMPANY_ID=123456
 FIC_SENDER_EMAIL=billing@yourcompany.com
+
+# Optional (local cache, see Caching section):
+# FIC_CACHE_DIR=~/.fattureincloud-mcp/cache
+# FIC_CACHE_DISABLED=1
 ```
 
 **How to get credentials:**
@@ -258,7 +303,38 @@ Fully quit Claude Desktop (Cmd+Q on Mac) and reopen it.
 "Check invoice numbering for 2025"
 "Convert proforma 12 to invoice"
 "Create a new client: Rossi SRL, VAT 01234567890"
+"Which cost centers do I have configured?"
+"Create an invoice for Acme with revenue center 'Project Alpha'"
+"Record a 500€ + VAT expense from Supplier X on cost center 'Project Alpha'"
 ```
+
+### 💾 Caching
+
+To reduce redundant API calls, client lookups and the cost-centers list are cached locally as JSON files (under `~/.fattureincloud-mcp/cache/`, scoped per `company_id`, 24h TTL).
+
+| Env var | Default | Effect |
+|---|---|---|
+| `FIC_CACHE_DIR` | `~/.fattureincloud-mcp/cache` | Override cache directory |
+| `FIC_CACHE_DISABLED` | `0` | If `1`, disable both cache reads and writes |
+
+To force refresh, delete the cache directory:
+```bash
+rm -rf ~/.fattureincloud-mcp/cache
+```
+
+### 🏷️ Cost / Revenue Centers
+
+FattureInCloud uses the same registry for "revenue centers" on issued documents and "cost centers" on received documents. You can:
+
+- Retrieve the list via `list_cost_centers`
+- Pass `revenue_center="<name>"` when creating an invoice, credit note, proforma, or duplicating/updating/converting an issued document
+- Pass `cost_center="<name>"` when creating a received document
+
+The value must already exist — centers are managed from the FattureInCloud web panel (Settings → Cost Centers). If you pass an unknown name, the tool replies with the list of valid names.
+
+### 🐛 Known issues
+
+- **Invoice duplication fails for some clients**: in specific cases `duplicate_invoice` may fail on unidentified client configurations. Workaround: duplicate manually from the FattureInCloud web panel. Investigation pending — see [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
 
 ### ⚠️ Security notes
 
