@@ -24,3 +24,9 @@ dist/
 # Local development
 *.log
 .DS_Store
+
+# Test artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/

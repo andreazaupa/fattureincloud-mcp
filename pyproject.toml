@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fattureincloud-mcp"
-version = "1.8.0"
+version = "1.9.0"
 description = "MCP Server for Fatture in Cloud API - Italian electronic invoicing with Claude AI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,4 +52,4 @@ Author = "https://media-form.it"
 fattureincloud-mcp = "server:main"
 
 [tool.setuptools]
-py-modules = ["server"]
+py-modules = ["server", "cache"]
