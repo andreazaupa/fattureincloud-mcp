@@ -94,13 +94,73 @@ def test_fetch_cost_centers_handles_exception(server_module):
     assert result == []
 
 
-def test_list_cost_centers_tool_returns_json(server_module):
+def test_list_cost_centers_tool_returns_union_of_endpoints(server_module):
+    """list_cost_centers MCP tool dispatch returns the union of the two
+    FIC endpoints (cost + revenue), deduplicated and sorted."""
     server = server_module
-    response = _mock_response(["Project Alpha", "Project Beta"])
+    cost_resp = _mock_response(["Alpha", "Shared"])
+    rev_resp = _mock_response(["Beta", "Shared"])
 
-    with patch.object(server.info_api, "list_cost_centers", return_value=response):
+    with patch.object(server.info_api, "list_cost_centers", return_value=cost_resp), \
+         patch.object(server.info_api, "list_revenue_centers", return_value=rev_resp):
         result = asyncio.run(server.call_tool("list_cost_centers", {}))
 
-    assert len(result) == 1
     payload = json.loads(result[0].text)
-    assert payload == ["Project Alpha", "Project Beta"]
+    assert payload == ["Alpha", "Beta", "Shared"]
+
+
+def test_fetch_revenue_centers_separate_from_cost(server_module):
+    """fetch_revenue_centers calls info_api.list_revenue_centers, NOT
+    info_api.list_cost_centers. Each helper has its own cache."""
+    server = server_module
+    cost_resp = _mock_response(["Cost-Only"])
+    rev_resp = _mock_response(["Revenue-Only"])
+
+    with patch.object(server.info_api, "list_cost_centers", return_value=cost_resp) as mc, \
+         patch.object(server.info_api, "list_revenue_centers", return_value=rev_resp) as mr:
+        cost = server.fetch_cost_centers(company_id=100)
+        revenue = server.fetch_revenue_centers(company_id=100)
+
+    assert cost == ["Cost-Only"]
+    assert revenue == ["Revenue-Only"]
+    assert mc.call_count == 1
+    assert mr.call_count == 1
+
+
+def test_revenue_center_validation_against_revenue_list_only(server_module):
+    """A name that exists only in revenue_centers is accepted on issued
+    documents; a name only in cost_centers is rejected on issued."""
+    server = server_module
+    # revenue-only name is valid for issued documents
+    cost_resp = _mock_response(["CostOnly"])
+    rev_resp = _mock_response(["RevenueOnly"])
+
+    fake_client = MagicMock()
+    fake_client.data.to_dict.return_value = {
+        "id": 5, "name": "Test", "ei_code": "X", "certified_email": "",
+    }
+    created = MagicMock()
+    created.data.to_dict.return_value = {
+        "id": 1, "number": 1, "type": "invoice", "date": "2026-05-11",
+    }
+
+    with patch.object(server.info_api, "list_cost_centers", return_value=cost_resp), \
+         patch.object(server.info_api, "list_revenue_centers", return_value=rev_resp), \
+         patch.object(server.clients_api, "get_client", return_value=fake_client), \
+         patch.object(server.issued_api, "create_issued_document", return_value=created):
+        good = asyncio.run(server.call_tool("create_invoice", {
+            "client_id": 5,
+            "items": [{"name": "X", "qty": 1, "net_price": 100, "vat_rate": 22}],
+            "revenue_center": "RevenueOnly",
+        }))
+        bad = asyncio.run(server.call_tool("create_invoice", {
+            "client_id": 5,
+            "items": [{"name": "X", "qty": 1, "net_price": 100, "vat_rate": 22}],
+            "revenue_center": "CostOnly",
+        }))
+
+    good_payload = json.loads(good[0].text)
+    bad_payload = json.loads(bad[0].text)
+    assert good_payload["success"] is True
+    assert bad_payload["success"] is False
+    assert "CostOnly" in bad_payload["error"]

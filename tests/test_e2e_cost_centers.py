@@ -42,6 +42,8 @@ def server_module(tmp_path, monkeypatch):
 
     list_cc_response = MagicMock()
     list_cc_response.data = list(KNOWN_CENTERS)
+    list_rc_response = MagicMock()
+    list_rc_response.data = list(KNOWN_CENTERS)
 
     client_response = MagicMock()
     client_response.data.to_dict.return_value = {
@@ -59,6 +61,7 @@ def server_module(tmp_path, monkeypatch):
     }
 
     with patch.object(server.info_api, "list_cost_centers", return_value=list_cc_response), \
+         patch.object(server.info_api, "list_revenue_centers", return_value=list_rc_response), \
          patch.object(server.clients_api, "get_client", return_value=client_response):
         yield server
 
@@ -117,11 +120,31 @@ def _mock_received_doc(doc_id=99, rc_center=None):
     return response
 
 
-def test_list_cost_centers(server_module):
+def test_list_cost_centers_returns_union(server_module):
+    """list_cost_centers MCP tool returns union of cost + revenue centers,
+    deduplicated and sorted."""
     server = server_module
     result = _run(server.call_tool("list_cost_centers", {}))
     payload = json.loads(result[0].text)
-    assert payload == KNOWN_CENTERS
+    assert payload == sorted(KNOWN_CENTERS)
+
+
+def test_list_cost_centers_dedups_overlap(server_module, monkeypatch):
+    """If a name appears in both cost and revenue lists, the tool dedups it."""
+    server = server_module
+    cost = MagicMock()
+    cost.data = ["Shared", "OnlyCost"]
+    rev = MagicMock()
+    rev.data = ["Shared", "OnlyRevenue"]
+    # invalidate caches from the previous fixture call
+    import cache as cache_mod
+    cache_mod.invalidate_all(100)
+
+    with patch.object(server.info_api, "list_cost_centers", return_value=cost), \
+         patch.object(server.info_api, "list_revenue_centers", return_value=rev):
+        result = _run(server.call_tool("list_cost_centers", {}))
+    payload = json.loads(result[0].text)
+    assert payload == ["OnlyCost", "OnlyRevenue", "Shared"]
 
 
 def test_create_invoice_with_revenue_center(server_module):
