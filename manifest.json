@@ -88,7 +88,7 @@
     {"name": "list_received_documents", "description": "List received (supplier) documents — expenses or received credit notes — for a year, with optional month and free-text query."},
     {"name": "get_situation", "description": "Yearly financial dashboard: net revenue (invoices minus credit notes), collected, outstanding, costs, margin. Optional client filter."},
     {"name": "check_numeration", "description": "Verify invoice numbering continuity for a given year. Reports gaps."},
-    {"name": "list_cost_centers", "description": "List configured cost / revenue centers. Same registry used as 'revenue_center' on issued documents and 'cost_center' on received documents."},
+    {"name": "list_cost_centers", "description": "List configured cost AND revenue centers (deduplicated union of the two FIC API endpoints, matching the 'Analisi centri c/r' view in FattureInCloud's UI). Validation on issued document mutations matches the input against revenue_centers only; validation on received document mutations matches against cost_centers only."},
     {"name": "get_received_document", "description": "Get full detail of a single received document by ID."},
     {"name": "create_received_document", "description": "Create a received document (expense or received credit note) with supplier, amounts, optional category and description, and optional cost_center."}
   ],

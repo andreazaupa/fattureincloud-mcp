@@ -99,8 +99,27 @@ def get_ei_code_for_client(client_id, *, company_id=None):
 
 @cache.cached("cost_centers", ttl=timedelta(hours=24))
 def fetch_cost_centers(*, company_id):
+    """Cost centers (FIC `/info/cost_centers`). Used to validate `cost_center`
+    on received documents only."""
     try:
         response = info_api.list_cost_centers(company_id=company_id)
+        return list(response.data or [])
+    except Exception:
+        return []
+
+
+@cache.cached("revenue_centers", ttl=timedelta(hours=24))
+def fetch_revenue_centers(*, company_id):
+    """Revenue centers (FIC `/info/revenue_centers`). Used to validate
+    `revenue_center` on issued documents only.
+
+    FIC keeps cost and revenue centers as two separate registries; the
+    `list_cost_centers` MCP tool returns their union (matching the
+    'Analisi centri c/r' view in the FIC UI), but mutation validation
+    has to use the type-specific list to match how the FIC API itself
+    accepts/rejects values."""
+    try:
+        response = info_api.list_revenue_centers(company_id=company_id)
         return list(response.data or [])
     except Exception:
         return []
@@ -155,11 +174,11 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         return None, f"Cliente con ID {client_id} non trovato"
 
     if revenue_center:
-        known = fetch_cost_centers(company_id=COMPANY_ID)
+        known = fetch_revenue_centers(company_id=COMPANY_ID)
         if revenue_center not in known:
             return None, (
                 f"revenue_center '{revenue_center}' non esiste. "
-                f"Disponibili: {known}. Crearli da web FIC (Impostazioni → Centri di costo)."
+                f"Disponibili: {known}. Crearli da web FIC (Impostazioni → Centri di costo/ricavo)."
             )
 
     entity = build_entity_from_client(client_id, client_data)
@@ -540,7 +559,7 @@ async def list_tools():
         ),
         Tool(
             name="list_cost_centers",
-            description="Lista i centri di costo/ricavo configurati in FattureInCloud. Stessa anagrafica usata come 'revenue_center' sui documenti emessi e 'cost_center' sui documenti ricevuti. Read-only.",
+            description="Lista combinata di centri di costo e ricavo configurati in FattureInCloud. L'API FIC espone due liste separate (cost_centers per documenti ricevuti, revenue_centers per documenti emessi); questo tool ne ritorna l'unione deduplicata e ordinata, coerente con la vista 'Analisi centri c/r' della UI FIC. Le validation interne dei tool di mutazione sono type-specific: create_invoice/credit_note/proforma/update_document/duplicate_invoice/convert_proforma_to_invoice validano `revenue_center` contro la sola lista revenue_centers; create_received_document valida `cost_center` contro la sola lista cost_centers. Read-only.",
             inputSchema={"type": "object", "properties": {}},
             annotations=_ann(read_only=True, idempotent=True),
         ),
@@ -854,7 +873,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             revenue_center = arguments.get("revenue_center") or orig.get("rc_center")
             if revenue_center:
-                known = fetch_cost_centers(company_id=COMPANY_ID)
+                known = fetch_revenue_centers(company_id=COMPANY_ID)
                 if revenue_center not in known:
                     return [TextContent(type="text", text=json.dumps({
                         "success": False,
@@ -961,7 +980,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             else:
                 revenue_center = orig.get("rc_center")
             if revenue_center:
-                known = fetch_cost_centers(company_id=COMPANY_ID)
+                known = fetch_revenue_centers(company_id=COMPANY_ID)
                 if revenue_center not in known:
                     return [TextContent(type="text", text=json.dumps({
                         "success": False,
@@ -1056,7 +1075,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             revenue_center = arguments.get("revenue_center") or orig.get("rc_center")
             if revenue_center:
-                known = fetch_cost_centers(company_id=COMPANY_ID)
+                known = fetch_revenue_centers(company_id=COMPANY_ID)
                 if revenue_center not in known:
                     return [TextContent(type="text", text=json.dumps({
                         "success": False,
@@ -1332,7 +1351,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "list_cost_centers":
-            centers = fetch_cost_centers(company_id=COMPANY_ID)
+            cost = fetch_cost_centers(company_id=COMPANY_ID)
+            revenue = fetch_revenue_centers(company_id=COMPANY_ID)
+            centers = sorted(set(cost) | set(revenue))
             return [TextContent(type="text", text=json.dumps(centers, indent=2, ensure_ascii=False))]
 
         elif name == "get_received_document":

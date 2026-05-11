@@ -1,6 +1,7 @@
 # Changelog
 
 ## v2.0.0
+- FIX: `list_cost_centers` and `revenue_center` / `cost_center` validation now correctly query the right FIC API endpoint. FIC exposes cost centers and revenue centers as **two separate registries** (`/info/cost_centers` and `/info/revenue_centers`); the previous implementation only queried `/info/cost_centers`, which silently broke `revenue_center` validation on every issued document tool when the account had only revenue centers configured (the common case). Fix: two internal cached fetchers (`fetch_cost_centers`, `fetch_revenue_centers`), the `list_cost_centers` MCP tool returns their deduplicated union (matching the FIC UI "Analisi centri c/r" view), and validation on document mutations is type-specific (issued documents validate `revenue_center` against revenue_centers; received documents validate `cost_center` against cost_centers).
 - NEW: MCPB bundle for Claude Desktop one-click installation. Distributable artifact `dist/fattureincloud.mcpb` produced by `scripts/build.sh`. Same 23 tools as v1.9.0, no behavioral changes for users.
 - NEW: `manifest.json` (manifest_version 0.3) declaring the server entry point, runtime deps, user_config (API token + company ID + sender email), and tool annotations.
 - NEW: tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) on all 23 tools, both in `manifest.json` and on the `Tool()` declarations in `server.py`. Helps MCP clients reason about safe-to-replay vs side-effecting calls.
