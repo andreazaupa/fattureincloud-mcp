@@ -652,16 +652,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         elif name == "list_clients":
             query = arguments.get("query")
-            response = clients_api.list_clients(company_id=COMPANY_ID, per_page=100)
             clients = []
-            for c in (response.data or []):
-                cd = c.to_dict()
-                client = {"id": cd.get("id"), "name": cd.get("name"),
-                          "vat": cd.get("vat_number"), "tax_code": cd.get("tax_code"),
-                          "email": cd.get("email")}
-                if query and query.lower() not in (client['name'] or '').lower():
-                    continue
-                clients.append(client)
+            if query:
+                response = clients_api.list_clients(
+                    company_id=COMPANY_ID, per_page=100,
+                    q=f"name contains '{query}'"
+                )
+                for c in (response.data or []):
+                    cd = c.to_dict()
+                    clients.append({"id": cd.get("id"), "name": cd.get("name"),
+                                    "vat": cd.get("vat_number"), "tax_code": cd.get("tax_code"),
+                                    "email": cd.get("email")})
+            else:
+                page = 1
+                while True:
+                    response = clients_api.list_clients(
+                        company_id=COMPANY_ID, per_page=100, page=page
+                    )
+                    for c in (response.data or []):
+                        cd = c.to_dict()
+                        clients.append({"id": cd.get("id"), "name": cd.get("name"),
+                                        "vat": cd.get("vat_number"), "tax_code": cd.get("tax_code"),
+                                        "email": cd.get("email")})
+                    if page >= (response.last_page or 1):
+                        break
+                    page += 1
             return [TextContent(type="text", text=json.dumps(clients, indent=2, ensure_ascii=False))]
 
         elif name == "get_company_info":
