@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.9.0
+"""Fatture in Cloud MCP Server - v2.0.0
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
@@ -19,10 +19,24 @@ from fattureincloud_python_sdk.api.issued_e_invoices_api import IssuedEInvoicesA
 from fattureincloud_python_sdk.api.received_documents_api import ReceivedDocumentsApi
 from fattureincloud_python_sdk.api.clients_api import ClientsApi
 from fattureincloud_python_sdk.api.companies_api import CompaniesApi
+from fattureincloud_python_sdk.api.info_api import InfoApi
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, ToolAnnotations
+
+import cache
+
+
+def _ann(read_only=False, destructive=False, idempotent=False, open_world=True):
+    """Shorthand for MCP tool annotations. openWorld defaults to True since
+    every tool talks to the FattureInCloud API."""
+    return ToolAnnotations(
+        readOnlyHint=read_only,
+        destructiveHint=destructive,
+        idempotentHint=idempotent,
+        openWorldHint=open_world,
+    )
 
 ACCESS_TOKEN = os.getenv("FIC_ACCESS_TOKEN", "")
 COMPANY_ID = int(os.getenv("FIC_COMPANY_ID", "0"))
@@ -37,6 +51,7 @@ einvoice_api = IssuedEInvoicesApi(api_client)
 received_api = ReceivedDocumentsApi(api_client)
 clients_api = ClientsApi(api_client)
 companies_api = CompaniesApi(api_client)
+info_api = InfoApi(api_client)
 
 app = Server("fattureincloud")
 
@@ -49,17 +64,27 @@ def get_total_from_doc(d):
     return sum((i.get('qty', 0) * i.get('gross_price', 0)) for i in items)
 
 
-def get_client_by_id(client_id):
+def get_client_by_id(client_id, *, company_id=None):
+    if company_id is None:
+        company_id = COMPANY_ID
+    resource = f"client_{client_id}"
+    hit = cache.get(resource, company_id, ttl=timedelta(hours=24))
+    if hit is not None:
+        return hit
     try:
-        response = clients_api.get_client(company_id=COMPANY_ID, client_id=client_id)
-        return response.data.to_dict()
+        response = clients_api.get_client(company_id=company_id, client_id=client_id)
+        data = response.data.to_dict()
+        cache.put(resource, company_id, data)
+        return data
     except:
         return None
 
 
-def get_ei_code_for_client(client_id):
+def get_ei_code_for_client(client_id, *, company_id=None):
+    if company_id is None:
+        company_id = COMPANY_ID
     try:
-        client = get_client_by_id(client_id)
+        client = get_client_by_id(client_id, company_id=company_id)
         if client:
             ei_code = (client.get('ei_code') or '').strip()
             if ei_code:
@@ -70,6 +95,34 @@ def get_ei_code_for_client(client_id):
         return '0000000'
     except:
         return '0000000'
+
+
+@cache.cached("cost_centers", ttl=timedelta(hours=24))
+def fetch_cost_centers(*, company_id):
+    """Cost centers (FIC `/info/cost_centers`). Used to validate `cost_center`
+    on received documents only."""
+    try:
+        response = info_api.list_cost_centers(company_id=company_id)
+        return list(response.data or [])
+    except Exception:
+        return []
+
+
+@cache.cached("revenue_centers", ttl=timedelta(hours=24))
+def fetch_revenue_centers(*, company_id):
+    """Revenue centers (FIC `/info/revenue_centers`). Used to validate
+    `revenue_center` on issued documents only.
+
+    FIC keeps cost and revenue centers as two separate registries; the
+    `list_cost_centers` MCP tool returns their union (matching the
+    'Analisi centri c/r' view in the FIC UI), but mutation validation
+    has to use the type-specific list to match how the FIC API itself
+    accepts/rejects values."""
+    try:
+        response = info_api.list_revenue_centers(company_id=company_id)
+        return list(response.data or [])
+    except Exception:
+        return []
 
 
 def build_entity_from_client(client_id, client_data=None):
@@ -114,10 +167,19 @@ def build_items_list(items_data, negate=False):
 
 
 def build_issued_document(doc_type, client_id, items_data, date_str, payment_days,
-                          visible_subject, negate_prices=False, source_invoice_id=None):
+                          visible_subject, negate_prices=False, source_invoice_id=None,
+                          revenue_center=None):
     client_data = get_client_by_id(client_id)
     if not client_data:
         return None, f"Cliente con ID {client_id} non trovato"
+
+    if revenue_center:
+        known = fetch_revenue_centers(company_id=COMPANY_ID)
+        if revenue_center not in known:
+            return None, (
+                f"revenue_center '{revenue_center}' non esiste. "
+                f"Disponibili: {known}. Crearli da web FIC (Impostazioni → Centri di costo/ricavo)."
+            )
 
     entity = build_entity_from_client(client_id, client_data)
     items_list = build_items_list(items_data, negate=False)
@@ -144,6 +206,8 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         }]
     }
 
+    if revenue_center:
+        body_data["rc_center"] = revenue_center
     if doc_type in ("invoice", "credit_note"):
         body_data["e_invoice"] = True
         body_data["ei_data"] = {"payment_method": "MP05"}
@@ -168,6 +232,8 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         "type": doc_type,
         "status": "bozza",
     }
+    if revenue_center:
+        result["revenue_center"] = revenue_center
     if source_invoice_id:
         result["linked_to_invoice"] = source_invoice_id
     return result, None
@@ -200,7 +266,8 @@ async def list_tools():
                     "type": {"type": "string", "description": "Tipo documento: invoice (default), credit_note, proforma"}
                 },
                 "required": ["year"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_invoice",
@@ -211,7 +278,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_pdf_url",
@@ -222,7 +290,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="list_clients",
@@ -232,12 +301,14 @@ async def list_tools():
                 "properties": {
                     "query": {"type": "string", "description": "Filtro nome/ragione sociale (opzionale)"}
                 }
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_company_info",
             description="Info azienda collegata",
-            inputSchema={"type": "object", "properties": {}}
+            inputSchema={"type": "object", "properties": {}},
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="create_client",
@@ -259,7 +330,8 @@ async def list_tools():
                     "phone": {"type": "string", "description": "Telefono (opzionale)"}
                 },
                 "required": ["name"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="update_client",
@@ -281,7 +353,8 @@ async def list_tools():
                     "phone": {"type": "string", "description": "Telefono (opzionale)"}
                 },
                 "required": ["client_id"]
-            }
+            },
+            annotations=_ann(idempotent=True),
         ),
         Tool(
             name="create_invoice",
@@ -293,10 +366,12 @@ async def list_tools():
                     "items": {"type": "array", "items": item_schema},
                     "date": {"type": "string", "description": "Data YYYY-MM-DD (default: oggi)"},
                     "payment_days": {"type": "integer", "description": "Giorni pagamento (default: 30)"},
-                    "visible_subject": {"type": "string", "description": "Oggetto visibile"}
+                    "visible_subject": {"type": "string", "description": "Oggetto visibile"},
+                    "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, deve esistere — vedi list_cost_centers)"}
                 },
                 "required": ["client_id", "items"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="create_credit_note",
@@ -309,10 +384,12 @@ async def list_tools():
                     "date": {"type": "string", "description": "Data YYYY-MM-DD (default: oggi)"},
                     "payment_days": {"type": "integer", "description": "Giorni pagamento (default: 30)"},
                     "visible_subject": {"type": "string", "description": "Oggetto visibile"},
-                    "source_invoice_id": {"type": "integer", "description": "ID fattura originale da stornare (opzionale)"}
+                    "source_invoice_id": {"type": "integer", "description": "ID fattura originale da stornare (opzionale)"},
+                    "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, deve esistere — vedi list_cost_centers)"}
                 },
                 "required": ["client_id", "items"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="create_proforma",
@@ -324,10 +401,12 @@ async def list_tools():
                     "items": {"type": "array", "items": item_schema},
                     "date": {"type": "string", "description": "Data YYYY-MM-DD (default: oggi)"},
                     "payment_days": {"type": "integer", "description": "Giorni pagamento (default: 30)"},
-                    "visible_subject": {"type": "string", "description": "Oggetto visibile"}
+                    "visible_subject": {"type": "string", "description": "Oggetto visibile"},
+                    "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, deve esistere — vedi list_cost_centers)"}
                 },
                 "required": ["client_id", "items"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="convert_proforma_to_invoice",
@@ -337,10 +416,12 @@ async def list_tools():
                 "properties": {
                     "document_id": {"type": "integer", "description": "ID proforma da convertire"},
                     "date": {"type": "string", "description": "Data fattura YYYY-MM-DD (default: data proforma)"},
-                    "keep_proforma": {"type": "boolean", "description": "Mantieni la proforma originale (default: false)"}
+                    "keep_proforma": {"type": "boolean", "description": "Mantieni la proforma originale (default: false)"},
+                    "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, eredita da proforma se non passato)"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(destructive=True),
         ),
         Tool(
             name="update_document",
@@ -356,10 +437,12 @@ async def list_tools():
                         "type": "array",
                         "items": item_schema,
                         "description": "Nuove righe documento (opzionale). Per NDC, importi sempre positivi."
-                    }
+                    },
+                    "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, mantiene quello esistente se non passato)"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(idempotent=True),
         ),
         Tool(
             name="duplicate_invoice",
@@ -377,10 +460,12 @@ async def list_tools():
                             "old": {"type": "string"},
                             "new": {"type": "string"}
                         }
-                    }
+                    },
+                    "revenue_center": {"type": "string", "description": "Centro di ricavo (opzionale, eredita dalla fattura sorgente se non passato)"}
                 },
                 "required": ["source_document_id"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="delete_invoice",
@@ -391,7 +476,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento da eliminare"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(destructive=True, idempotent=True),
         ),
         Tool(
             name="send_to_sdi",
@@ -402,7 +488,8 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento da inviare"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="get_invoice_status",
@@ -413,11 +500,12 @@ async def list_tools():
                     "document_id": {"type": "integer", "description": "ID documento"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="send_email",
-            description="Invia copia cortesia via email al cliente. IMPORTANTE: Chiedere conferma prima di eseguire.",
+            description="Invia copia cortesia via email al cliente. Requires FIC_SENDER_EMAIL to be configured in extension settings. IMPORTANTE: Chiedere conferma prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -427,7 +515,8 @@ async def list_tools():
                     "body": {"type": "string", "description": "Corpo email (opzionale)"}
                 },
                 "required": ["document_id"]
-            }
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="list_received_documents",
@@ -441,7 +530,8 @@ async def list_tools():
                     "query": {"type": "string", "description": "Filtro testuale (opzionale)"}
                 },
                 "required": ["year"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="get_situation",
@@ -452,7 +542,8 @@ async def list_tools():
                     "year": {"type": "integer", "description": "Anno (default: corrente)"},
                     "client_name": {"type": "string", "description": "Filtro per nome cliente (opzionale, ricerca parziale)"}
                 }
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
         ),
         Tool(
             name="check_numeration",
@@ -463,7 +554,46 @@ async def list_tools():
                     "year": {"type": "integer", "description": "Anno da verificare (es. 2025)"}
                 },
                 "required": ["year"]
-            }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
+        ),
+        Tool(
+            name="list_cost_centers",
+            description="Lista combinata di centri di costo e ricavo configurati in FattureInCloud. L'API FIC espone due liste separate (cost_centers per documenti ricevuti, revenue_centers per documenti emessi); questo tool ne ritorna l'unione deduplicata e ordinata, coerente con la vista 'Analisi centri c/r' della UI FIC. Le validation interne dei tool di mutazione sono type-specific: create_invoice/credit_note/proforma/update_document/duplicate_invoice/convert_proforma_to_invoice validano `revenue_center` contro la sola lista revenue_centers; create_received_document valida `cost_center` contro la sola lista cost_centers. Read-only.",
+            inputSchema={"type": "object", "properties": {}},
+            annotations=_ann(read_only=True, idempotent=True),
+        ),
+        Tool(
+            name="get_received_document",
+            description="Dettaglio fattura passiva (ricevuta da fornitore) per ID. Read-only.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "integer", "description": "ID documento ricevuto"}
+                },
+                "required": ["document_id"]
+            },
+            annotations=_ann(read_only=True, idempotent=True),
+        ),
+        Tool(
+            name="create_received_document",
+            description="Crea documento passivo (fattura ricevuta o NDC ricevuta) registrando una spesa. IMPORTANTE: Chiedere conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "supplier_name": {"type": "string", "description": "Nome/Ragione sociale del fornitore"},
+                    "supplier_vat_number": {"type": "string", "description": "Partita IVA del fornitore (opzionale)"},
+                    "type": {"type": "string", "description": "Tipo: expense (default) o credit_note"},
+                    "date": {"type": "string", "description": "Data documento YYYY-MM-DD (default: oggi)"},
+                    "amount_net": {"type": "number", "description": "Importo netto"},
+                    "amount_vat": {"type": "number", "description": "Importo IVA"},
+                    "category": {"type": "string", "description": "Categoria spesa (opzionale)"},
+                    "description": {"type": "string", "description": "Descrizione/oggetto (opzionale)"},
+                    "cost_center": {"type": "string", "description": "Centro di costo (opzionale, deve esistere — vedi list_cost_centers)"}
+                },
+                "required": ["supplier_name", "amount_net"]
+            },
+            annotations=_ann(),
         ),
         Tool(
             name="list_orders",
@@ -579,6 +709,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "subject": d.get("subject"),
                     "description": d.get("visible_subject")
                 }
+                if d.get("rc_center"):
+                    inv["revenue_center"] = d["rc_center"]
                 if query:
                     search_text = f"{inv['client']} {inv['subject']} {inv['description']}".lower()
                     if query.lower() not in search_text:
@@ -629,6 +761,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "ei_status": d.get("ei_status"),
                 "original_document": d.get("original_document")
             }
+            if d.get("rc_center"):
+                result["revenue_center"] = d["rc_center"]
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "get_pdf_url":
@@ -753,6 +887,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 date_str=arguments.get("date", datetime.now().strftime("%Y-%m-%d")),
                 payment_days=arguments.get("payment_days", 30),
                 visible_subject=arguments.get("visible_subject", ""),
+                revenue_center=arguments.get("revenue_center"),
             )
             if error:
                 return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
@@ -768,7 +903,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 payment_days=arguments.get("payment_days", 30),
                 visible_subject=arguments.get("visible_subject", ""),
                 negate_prices=True,
-                source_invoice_id=arguments.get("source_invoice_id")
+                source_invoice_id=arguments.get("source_invoice_id"),
+                revenue_center=arguments.get("revenue_center"),
             )
             if error:
                 return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
@@ -787,6 +923,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 date_str=arguments.get("date", datetime.now().strftime("%Y-%m-%d")),
                 payment_days=arguments.get("payment_days", 30),
                 visible_subject=arguments.get("visible_subject", ""),
+                revenue_center=arguments.get("revenue_center"),
             )
             if error:
                 return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
@@ -831,7 +968,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             due_date = invoice_date + timedelta(days=payment_days)
             total_gross = sum(i["qty"] * i["net_price"] * (1 + i["vat"]["value"] / 100) for i in items_list)
 
-            body = {"data": {
+            revenue_center = arguments.get("revenue_center") or orig.get("rc_center")
+            if revenue_center:
+                known = fetch_revenue_centers(company_id=COMPANY_ID)
+                if revenue_center not in known:
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": False,
+                        "error": f"revenue_center '{revenue_center}' non esiste. Disponibili: {known}."
+                    }, ensure_ascii=False))]
+
+            body_data = {
                 "type": "invoice",
                 "e_invoice": True,
                 "ei_data": {"payment_method": "MP05"},
@@ -845,7 +991,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "status": "not_paid",
                     "payment_terms": {"days": payment_days, "type": "standard"}
                 }]
-            }}
+            }
+            if revenue_center:
+                body_data["rc_center"] = revenue_center
+            body = {"data": body_data}
 
             response = issued_api.create_issued_document(
                 company_id=COMPANY_ID, create_issued_document_request=body
@@ -867,6 +1016,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "proforma_deleted": not keep_proforma,
                 "message": f"Fattura #{d.get('number')} creata da proforma #{orig.get('number')}. {'Proforma eliminata.' if not keep_proforma else 'Proforma mantenuta.'} Usa send_to_sdi per inviarla."
             }
+            if revenue_center:
+                result["revenue_center"] = revenue_center
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "update_document":
@@ -921,6 +1072,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             client_data = get_client_by_id(client_id) if client_id else None
             entity = build_entity_from_client(client_id, client_data) if (client_id and client_data) else orig.get("entity", {})
 
+            if "revenue_center" in arguments:
+                revenue_center = arguments["revenue_center"]
+            else:
+                revenue_center = orig.get("rc_center")
+            if revenue_center:
+                known = fetch_revenue_centers(company_id=COMPANY_ID)
+                if revenue_center not in known:
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": False,
+                        "error": f"revenue_center '{revenue_center}' non esiste. Disponibili: {known}."
+                    }, ensure_ascii=False))]
+
             body_data = {
                 "type": doc_type,
                 "entity": entity,
@@ -934,6 +1097,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "payment_terms": {"days": payment_days, "type": "standard"}
                 }]
             }
+            if revenue_center:
+                body_data["rc_center"] = revenue_center
             if doc_type in ("invoice", "credit_note"):
                 body_data["e_invoice"] = True
                 body_data["ei_data"] = {"payment_method": "MP05"}
@@ -959,6 +1124,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "status": "bozza",
                 "message": f"Documento #{d.get('number')} aggiornato con successo."
             }
+            if revenue_center:
+                result["revenue_center"] = revenue_center
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "duplicate_invoice":
@@ -1003,7 +1170,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             due_date = invoice_date + timedelta(days=payment_days)
             total_gross = sum(i["qty"] * i["net_price"] * (1 + i["vat"]["value"] / 100) for i in items_list)
 
-            body = {"data": {
+            revenue_center = arguments.get("revenue_center") or orig.get("rc_center")
+            if revenue_center:
+                known = fetch_revenue_centers(company_id=COMPANY_ID)
+                if revenue_center not in known:
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": False,
+                        "error": f"revenue_center '{revenue_center}' non esiste. Disponibili: {known}."
+                    }, ensure_ascii=False))]
+
+            body_data = {
                 "type": "invoice", "e_invoice": True, "ei_data": {"payment_method": "MP05"},
                 "entity": entity, "date": new_date_str, "visible_subject": visible_subject,
                 "items_list": items_list,
@@ -1011,7 +1187,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                                    "due_date": due_date.strftime("%Y-%m-%d"),
                                    "status": "not_paid",
                                    "payment_terms": {"days": payment_days, "type": "standard"}}]
-            }}
+            }
+            if revenue_center:
+                body_data["rc_center"] = revenue_center
+            body = {"data": body_data}
             response = issued_api.create_issued_document(
                 company_id=COMPANY_ID, create_issued_document_request=body
             )
@@ -1024,6 +1203,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "source_invoice": orig.get("number"), "status": "bozza",
                 "message": f"Fattura #{d.get('number')} creata come bozza (duplicata da #{orig.get('number')}). Scadenza: {due_date.strftime('%d/%m/%Y')}."
             }
+            if revenue_center:
+                result["revenue_center"] = revenue_center
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "delete_invoice":
@@ -1094,6 +1275,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "send_email":
+            if not SENDER_EMAIL:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": "❌ Sender email not configured. Open Claude Desktop → Extensions → FattureInCloud → Settings and set the 'Sender email' field, then retry the operation."
+                }, ensure_ascii=False))]
             doc_id = arguments["document_id"]
             check = issued_api.get_issued_document(
                 company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
@@ -1103,10 +1289,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if not recipient_email:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False, "error": "Nessuna email specificata e cliente senza email in anagrafica"
-                }, ensure_ascii=False))]
-            if not SENDER_EMAIL:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False, "error": "FIC_SENDER_EMAIL non configurato nel .env"
                 }, ensure_ascii=False))]
             email_data = {"data": {
                 "sender_email": SENDER_EMAIL, "recipient_email": recipient_email, "cc_email": "",
@@ -1144,11 +1326,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 desc = d.get('description', '') or ''
                 if query and query.lower() not in f"{supplier_name} {desc}".lower():
                     continue
-                docs.append({
+                entry = {
                     "id": d.get("id"), "number": d.get("number"),
                     "date": str(d.get("date", "")), "supplier": supplier_name,
                     "description": desc[:80], "total": d.get('amount_gross') or d.get('amount_net') or 0
-                })
+                }
+                if d.get("rc_center"):
+                    entry["cost_center"] = d["rc_center"]
+                docs.append(entry)
             return [TextContent(type="text", text=json.dumps(docs, indent=2, ensure_ascii=False))]
 
         elif name == "get_situation":
@@ -1260,6 +1445,106 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "status": "✓ Numerazione continua" if len(gaps) == 0 else f"⚠ Trovati {len(gaps)} problemi",
                 "gaps": gaps
             }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "list_cost_centers":
+            cost = fetch_cost_centers(company_id=COMPANY_ID)
+            revenue = fetch_revenue_centers(company_id=COMPANY_ID)
+            centers = sorted(set(cost) | set(revenue))
+            return [TextContent(type="text", text=json.dumps(centers, indent=2, ensure_ascii=False))]
+
+        elif name == "get_received_document":
+            doc_id = arguments["document_id"]
+            response = received_api.get_received_document(
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
+            )
+            d = response.data.to_dict()
+            items = []
+            for i in d.get("items_list", []) or []:
+                items.append({
+                    "name": i.get("name"),
+                    "description": i.get("description"),
+                    "qty": i.get("qty"),
+                    "net_price": i.get("net_price", 0),
+                    "vat": i.get("vat", {}).get("value") if i.get("vat") else None
+                })
+            payments = []
+            for p in d.get("payments_list", []) or []:
+                payments.append({
+                    "amount": p.get("amount"),
+                    "due_date": str(p.get("due_date", "")),
+                    "status": str(p.get("status", "")).replace("ReceivedDocumentStatus.", ""),
+                    "paid_date": str(p.get("paid_date", "")) if p.get("paid_date") else None,
+                })
+            result = {
+                "id": d.get("id"),
+                "type": d.get("type"),
+                "number": d.get("invoice_number"),
+                "date": str(d.get("date", "")),
+                "supplier": d.get("entity", {}).get("name") if d.get("entity") else None,
+                "supplier_vat": d.get("entity", {}).get("vat_number") if d.get("entity") else None,
+                "description": d.get("description"),
+                "category": d.get("category"),
+                "amount_net": d.get("amount_net"),
+                "amount_vat": d.get("amount_vat"),
+                "amount_gross": d.get("amount_gross"),
+                "items": items,
+                "payments": payments,
+            }
+            if d.get("rc_center"):
+                result["cost_center"] = d["rc_center"]
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "create_received_document":
+            cost_center = arguments.get("cost_center")
+            if cost_center:
+                known = fetch_cost_centers(company_id=COMPANY_ID)
+                if cost_center not in known:
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": False,
+                        "error": f"cost_center '{cost_center}' non esiste. Disponibili: {known}."
+                    }, ensure_ascii=False))]
+
+            doc_type = arguments.get("type", "expense")
+            date_str = arguments.get("date", datetime.now().strftime("%Y-%m-%d"))
+            amount_net = arguments["amount_net"]
+            amount_vat = arguments.get("amount_vat", 0)
+
+            entity = {"name": arguments["supplier_name"]}
+            if arguments.get("supplier_vat_number"):
+                entity["vat_number"] = arguments["supplier_vat_number"]
+
+            body_data = {
+                "type": doc_type,
+                "entity": entity,
+                "date": date_str,
+                "amount_net": amount_net,
+                "amount_vat": amount_vat,
+                "amount_gross": amount_net + amount_vat,
+            }
+            if arguments.get("category"):
+                body_data["category"] = arguments["category"]
+            if arguments.get("description"):
+                body_data["description"] = arguments["description"]
+            if cost_center:
+                body_data["rc_center"] = cost_center
+
+            response = received_api.create_received_document(
+                company_id=COMPANY_ID,
+                create_received_document_request={"data": body_data}
+            )
+            d = response.data.to_dict()
+            result = {
+                "success": True,
+                "id": d.get("id"),
+                "type": d.get("type"),
+                "supplier": d.get("entity", {}).get("name") if d.get("entity") else arguments["supplier_name"],
+                "date": str(d.get("date", "")),
+                "amount_gross": d.get("amount_gross") or (amount_net + amount_vat),
+                "message": f"Documento ricevuto creato (ID {d.get('id')}).",
+            }
+            if cost_center:
+                result["cost_center"] = cost_center
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name in ("list_orders", "list_quotes", "list_delivery_notes"):
