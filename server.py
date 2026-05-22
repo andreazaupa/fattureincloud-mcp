@@ -597,41 +597,41 @@ async def list_tools():
         ),
         Tool(
             name="list_orders",
-            description="Lista ordini cliente emessi. Filtri: year (obbligatorio), month (opzionale), query (opzionale).",
+            description="Lista ordini cliente emessi. Se ometti year con una query, cerca su tutti gli anni. Filtri: year (opzionale), month (opzionale), query (opzionale).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "year": {"type": "integer", "description": "Anno (es. 2025)"},
+                    "year": {"type": "integer", "description": "Anno (es. 2025). Se omesso con query, cerca su tutti gli anni; senza query usa l'anno corrente."},
                     "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
                     "query": {"type": "string", "description": "Filtro testuale su cliente/oggetto (opzionale)"}
                 },
-                "required": ["year"]
+                "required": []
             }
         ),
         Tool(
             name="list_quotes",
-            description="Lista preventivi emessi. Filtri: year (obbligatorio), month (opzionale), query (opzionale).",
+            description="Lista preventivi emessi. Se ometti year con una query, cerca su tutti gli anni. Filtri: year (opzionale), month (opzionale), query (opzionale).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "year": {"type": "integer", "description": "Anno (es. 2025)"},
+                    "year": {"type": "integer", "description": "Anno (es. 2025). Se omesso con query, cerca su tutti gli anni; senza query usa l'anno corrente."},
                     "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
                     "query": {"type": "string", "description": "Filtro testuale su cliente/oggetto (opzionale)"}
                 },
-                "required": ["year"]
+                "required": []
             }
         ),
         Tool(
             name="list_delivery_notes",
-            description="Lista DDT (documenti di trasporto) emessi. Filtri: year (obbligatorio), month (opzionale), query (opzionale).",
+            description="Lista DDT (documenti di trasporto) emessi. Se ometti year con una query, cerca su tutti gli anni. Filtri: year (opzionale), month (opzionale), query (opzionale).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "year": {"type": "integer", "description": "Anno (es. 2025)"},
+                    "year": {"type": "integer", "description": "Anno (es. 2025). Se omesso con query, cerca su tutti gli anni; senza query usa l'anno corrente."},
                     "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
                     "query": {"type": "string", "description": "Filtro testuale su cliente/oggetto (opzionale)"}
                 },
-                "required": ["year"]
+                "required": []
             }
         ),
         Tool(
@@ -1550,35 +1550,54 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name in ("list_orders", "list_quotes", "list_delivery_notes"):
             type_map = {"list_orders": "order", "list_quotes": "quote", "list_delivery_notes": "delivery_note"}
             doc_type = type_map[name]
-            year = arguments.get("year", datetime.now().year)
+            year = arguments.get("year")
             month = arguments.get("month")
             query = arguments.get("query")
 
-            q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
-            if month:
-                last_day = 31 if month in [1,3,5,7,8,10,12] else 30 if month in [4,6,9,11] else 29
-                q = f"date >= '{year}-{month:02d}-01' and date <= '{year}-{month:02d}-{last_day}'"
+            # Se year non è fornito e c'è una query, cerca su tutti gli anni.
+            # Se year non è fornito e non c'è query, usa l'anno corrente per non scaricare tutto l'archivio.
+            if year is None and not query:
+                year = datetime.now().year
 
-            response = issued_api.list_issued_documents(
-                company_id=COMPANY_ID, type=doc_type, q=q, per_page=100, fieldset="detailed"
-            )
+            filters = []
+            if year and month:
+                last_day = 31 if month in [1,3,5,7,8,10,12] else 30 if month in [4,6,9,11] else 29
+                filters.append(f"date >= '{year}-{month:02d}-01' and date <= '{year}-{month:02d}-{last_day}'")
+            elif year:
+                filters.append(f"date >= '{year}-01-01' and date <= '{year}-12-31'")
+
+            if query:
+                filters.append(f"entity_name contains '{query}'")
+
+            q = " and ".join(filters) if filters else None
+
             docs = []
-            for doc in (response.data or []):
-                d = doc.to_dict()
-                item = {
-                    "id": d.get("id"),
-                    "number": d.get("number"),
-                    "date": str(d.get("date", "")),
-                    "client": d.get("entity", {}).get("name") if d.get("entity") else None,
-                    "total": get_total_from_doc(d),
-                    "subject": d.get("subject"),
-                    "description": d.get("visible_subject")
-                }
-                if query:
-                    search_text = f"{item['client']} {item['subject']} {item['description']}".lower()
-                    if query.lower() not in search_text:
-                        continue
-                docs.append(item)
+            page = 1
+            while True:
+                response = issued_api.list_issued_documents(
+                    company_id=COMPANY_ID, type=doc_type, per_page=100, page=page,
+                    fieldset="detailed", q=q
+                )
+                for doc in (response.data or []):
+                    d = doc.to_dict()
+                    item = {
+                        "id": d.get("id"),
+                        "number": d.get("number"),
+                        "date": str(d.get("date", "")),
+                        "client": d.get("entity", {}).get("name") if d.get("entity") else None,
+                        "total": get_total_from_doc(d),
+                        "subject": d.get("subject"),
+                        "description": d.get("visible_subject")
+                    }
+                    # Filtro client-side su subject/visible_subject (non coperti da entity_name)
+                    if query:
+                        search_text = f"{item['subject']} {item['description']}".lower()
+                        if query.lower() not in (item['client'] or '').lower() and query.lower() not in search_text:
+                            continue
+                    docs.append(item)
+                if page >= (response.last_page or 1):
+                    break
+                page += 1
             return [TextContent(type="text", text=json.dumps(docs, indent=2, ensure_ascii=False))]
 
         elif name == "create_order":
